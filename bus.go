@@ -73,8 +73,37 @@ func openWith(adapt rawAdapter, ch Channel, fd bool, fdBitrate string, opts ...O
 		errCh:   make(chan error, cfg.errBufferSize),
 		closing: make(chan struct{}),
 	}
-	// reader goroutine 在阶段 4 启动。
+	b.startReader()
 	return b, nil
+}
+
+// ReadOne 阻塞从接收队列取一帧，直到 ctx 取消或 Bus 关闭。
+//
+// Bus 关闭时返回 ErrBusClosed。
+// ctx 被取消时返回 ctx.Err()。
+func (b *Bus) ReadOne(ctx context.Context) (Frame, error) {
+	select {
+	case f, ok := <-b.rxCh:
+		if !ok {
+			return Frame{}, ErrBusClosed
+		}
+		return f, nil
+	case <-ctx.Done():
+		return Frame{}, ctx.Err()
+	}
+}
+
+// TryRead 非阻塞读一帧。队列空时返回 ErrQueueEmpty；Bus 已关闭返回 ErrBusClosed。
+func (b *Bus) TryRead() (Frame, error) {
+	select {
+	case f, ok := <-b.rxCh:
+		if !ok {
+			return Frame{}, ErrBusClosed
+		}
+		return f, nil
+	default:
+		return Frame{}, ErrQueueEmpty
+	}
 }
 
 // Send 同步发送一帧。Close 后调用返回 ErrBusClosed。
@@ -146,13 +175,17 @@ func (b *Bus) Reset() error {
 
 // Close 释放底层通道。幂等：多次调用安全。
 //
-// 阶段 3 简化实现：直接 Uninitialize；reader goroutine 关闭逻辑在阶段 4 接入。
+// 流程：标记 closed → 关闭 closing channel 通知 reader → 等 reader 退出
+// （表现为 rxCh 被 reader 关闭）→ Uninitialize 释放底层资源 → 关闭 errCh。
 func (b *Bus) Close() error {
 	var err error
 	b.closeOnce.Do(func() {
 		b.closed.Store(true)
 		close(b.closing)
-		close(b.rxCh)
+		// 等 reader goroutine 退出 —— 它在退出时关闭 rxCh。
+		for range b.rxCh {
+			// 丢弃剩余帧，避免 reader 阻塞在 rxCh 发送。
+		}
 		if s := b.adapt.Uninitialize(b.ch); s != raw.PCAN_ERROR_OK {
 			err = wrapStatus(b.adapt, "CAN_Uninitialize", s)
 		}

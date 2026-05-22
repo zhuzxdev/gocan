@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/Crush251/pcanbasic_go/raw"
 )
@@ -326,3 +327,268 @@ func TestDataLenDLC_Roundtrip(t *testing.T) {
 		}
 	}
 }
+
+// ---- reader / Receive / ReadOne / TryRead ----
+
+func TestReader_SuppressQRCVEMPTY(t *testing.T) {
+	f := newFakeAdapter()
+	bus := openTest(t, f, WithPollInterval(2*time.Millisecond))
+	defer bus.Close()
+
+	time.Sleep(20 * time.Millisecond)
+
+	select {
+	case e := <-bus.Errors():
+		t.Fatalf("errCh should not receive QRCVEMPTY: %v", e)
+	default:
+	}
+}
+
+func TestReader_DrainsQueue(t *testing.T) {
+	f := newFakeAdapter()
+	for i := 0; i < 5; i++ {
+		f.push(raw.TPCANMsg{ID: uint32(0x100 + i), Len: 1, Data: [8]byte{byte(i)}})
+	}
+	bus := openTest(t, f, WithPollInterval(time.Millisecond))
+	defer bus.Close()
+
+	got := 0
+	deadline := time.After(500 * time.Millisecond)
+	for got < 5 {
+		select {
+		case fr := <-bus.Receive():
+			if fr.ID != uint32(0x100+got) {
+				t.Errorf("ID[%d] = 0x%X", got, fr.ID)
+			}
+			got++
+		case <-deadline:
+			t.Fatalf("timeout after %d frames", got)
+		}
+	}
+}
+
+func TestReader_FlagsRoundtrip(t *testing.T) {
+	f := newFakeAdapter()
+	f.push(raw.TPCANMsg{
+		ID:      0x1FFFFFFF,
+		MsgType: raw.PCAN_MESSAGE_EXTENDED | raw.PCAN_MESSAGE_RTR,
+		Len:     4,
+	})
+	bus := openTest(t, f, WithPollInterval(time.Millisecond))
+	defer bus.Close()
+
+	select {
+	case fr := <-bus.Receive():
+		if !fr.Has(FlagExtended) || !fr.Has(FlagRemote) {
+			t.Errorf("missing flags: %b", fr.Flags)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timeout waiting for frame")
+	}
+}
+
+func TestReader_FDFrame(t *testing.T) {
+	f := newFakeAdapter()
+	f.pushFD(raw.TPCANMsgFD{
+		ID:      0x123,
+		MsgType: raw.PCAN_MESSAGE_FD | raw.PCAN_MESSAGE_BRS,
+		DLC:     10, // = 16 bytes
+	})
+	bus := openTestFD(t, f, WithPollInterval(time.Millisecond))
+	defer bus.Close()
+
+	select {
+	case fr := <-bus.Receive():
+		if !fr.Has(FlagFD) || !fr.Has(FlagBRS) {
+			t.Errorf("missing flags: %b", fr.Flags)
+		}
+		if len(fr.Data) != 16 {
+			t.Errorf("len(Data) = %d, want 16", len(fr.Data))
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timeout waiting for FD frame")
+	}
+}
+
+func TestReadOne_OK(t *testing.T) {
+	f := newFakeAdapter()
+	f.push(raw.TPCANMsg{ID: 0x123, Len: 2, Data: [8]byte{1, 2}})
+	bus := openTest(t, f, WithPollInterval(time.Millisecond))
+	defer bus.Close()
+
+	fr, err := bus.ReadOne(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fr.ID != 0x123 || len(fr.Data) != 2 {
+		t.Errorf("bad frame: %+v", fr)
+	}
+	if fr.ReceivedAt.IsZero() {
+		t.Error("expected ReceivedAt to be set")
+	}
+}
+
+func TestReadOne_CtxCancel(t *testing.T) {
+	f := newFakeAdapter()
+	bus := openTest(t, f, WithPollInterval(50*time.Millisecond))
+	defer bus.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := bus.ReadOne(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("got %v, want context.Canceled", err)
+	}
+}
+
+func TestReadOne_AfterClose(t *testing.T) {
+	f := newFakeAdapter()
+	bus := openTest(t, f)
+	bus.Close()
+	_, err := bus.ReadOne(context.Background())
+	if !errors.Is(err, ErrBusClosed) {
+		t.Errorf("got %v, want ErrBusClosed", err)
+	}
+}
+
+func TestTryRead_Empty(t *testing.T) {
+	f := newFakeAdapter()
+	bus := openTest(t, f, WithPollInterval(50*time.Millisecond))
+	defer bus.Close()
+	_, err := bus.TryRead()
+	if !errors.Is(err, ErrQueueEmpty) {
+		t.Errorf("got %v, want ErrQueueEmpty", err)
+	}
+}
+
+func TestTryRead_HasFrame(t *testing.T) {
+	f := newFakeAdapter()
+	f.push(raw.TPCANMsg{ID: 0x42, Len: 1, Data: [8]byte{0xAB}})
+	bus := openTest(t, f, WithPollInterval(time.Millisecond))
+	defer bus.Close()
+
+	// 等 reader 把帧推到 rxCh。
+	var fr Frame
+	deadline := time.After(200 * time.Millisecond)
+	for {
+		var err error
+		fr, err = bus.TryRead()
+		if err == nil {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("never got frame: %v", err)
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	if fr.ID != 0x42 {
+		t.Errorf("ID = 0x%X, want 0x42", fr.ID)
+	}
+}
+
+func TestTryRead_AfterClose(t *testing.T) {
+	f := newFakeAdapter()
+	bus := openTest(t, f)
+	bus.Close()
+	_, err := bus.TryRead()
+	if !errors.Is(err, ErrBusClosed) {
+		t.Errorf("got %v, want ErrBusClosed", err)
+	}
+}
+
+func TestReceive_AfterClose(t *testing.T) {
+	f := newFakeAdapter()
+	bus := openTest(t, f)
+	bus.Close()
+
+	fr, ok := <-bus.Receive()
+	if ok {
+		t.Errorf("expected closed channel, got frame %+v", fr)
+	}
+}
+
+func TestReader_PropagatesPCANError(t *testing.T) {
+	// 注入一个非 OK / 非 QRCVEMPTY 的状态，应该出现在 Errors() 里。
+	// 这里用一个 fakeAdapter 子类型不方便，直接修改 read 路径太重，
+	// 改用：先 push 正常帧让 reader 取走，再切换 statusReturn 不会改变 Read 行为；
+	// 简单做法：直接构造一种 adapter 让 Read 返回 BUSOFF。
+	f := &errInjectingAdapter{readErr: raw.PCAN_ERROR_BUSOFF}
+	bus, err := openWith(f, USBBus1, false, "", WithPollInterval(time.Millisecond))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer bus.Close()
+
+	select {
+	case e := <-bus.Errors():
+		if !errors.Is(e, ErrBusOff) {
+			t.Errorf("got %v, want ErrBusOff", e)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected BUSOFF on Errors()")
+	}
+}
+
+func TestConcurrent_SendReceive(t *testing.T) {
+	f := newFakeAdapter()
+	for i := 0; i < 50; i++ {
+		f.push(raw.TPCANMsg{ID: uint32(i), Len: 1, Data: [8]byte{byte(i)}})
+	}
+	bus := openTest(t, f, WithPollInterval(time.Millisecond))
+	defer bus.Close()
+
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 50; i++ {
+			fr, _ := NewFrame(uint32(i), []byte{byte(i)})
+			_ = bus.Send(context.Background(), fr)
+		}
+		close(done)
+	}()
+	received := 0
+	deadline := time.After(1 * time.Second)
+	for received < 50 {
+		select {
+		case <-bus.Receive():
+			received++
+		case <-deadline:
+			t.Fatalf("only got %d frames", received)
+		}
+	}
+	<-done
+}
+
+// errInjectingAdapter 是一个最小 rawAdapter，仅用于让 Read 持续返回特定错误。
+type errInjectingAdapter struct {
+	readErr raw.TPCANStatus
+}
+
+func (a *errInjectingAdapter) Initialize(raw.TPCANHandle, raw.TPCANBaudrate) raw.TPCANStatus {
+	return raw.PCAN_ERROR_OK
+}
+func (a *errInjectingAdapter) InitializeFD(raw.TPCANHandle, string) raw.TPCANStatus {
+	return raw.PCAN_ERROR_OK
+}
+func (a *errInjectingAdapter) Uninitialize(raw.TPCANHandle) raw.TPCANStatus {
+	return raw.PCAN_ERROR_OK
+}
+func (a *errInjectingAdapter) Read(raw.TPCANHandle, *raw.TPCANMsg, *raw.TPCANTimestamp) raw.TPCANStatus {
+	return a.readErr
+}
+func (a *errInjectingAdapter) ReadFD(raw.TPCANHandle, *raw.TPCANMsgFD, *raw.TPCANTimestampFD) raw.TPCANStatus {
+	return a.readErr
+}
+func (a *errInjectingAdapter) Write(raw.TPCANHandle, *raw.TPCANMsg) raw.TPCANStatus {
+	return raw.PCAN_ERROR_OK
+}
+func (a *errInjectingAdapter) WriteFD(raw.TPCANHandle, *raw.TPCANMsgFD) raw.TPCANStatus {
+	return raw.PCAN_ERROR_OK
+}
+func (a *errInjectingAdapter) GetStatus(raw.TPCANHandle) raw.TPCANStatus {
+	return raw.PCAN_ERROR_OK
+}
+func (a *errInjectingAdapter) GetErrorText(raw.TPCANStatus, uint16) (string, raw.TPCANStatus) {
+	return "fake", raw.PCAN_ERROR_OK
+}
+func (a *errInjectingAdapter) Reset(raw.TPCANHandle) raw.TPCANStatus { return raw.PCAN_ERROR_OK }
