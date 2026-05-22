@@ -1,6 +1,10 @@
 package pcanbasic
 
-import "github.com/Crush251/pcanbasic_go/raw"
+import (
+	"unsafe"
+
+	"github.com/Crush251/pcanbasic_go/raw"
+)
 
 // rawAdapter 是 Bus 用到的底层调用接口抽象，便于测试时注入 fake。
 //
@@ -18,6 +22,11 @@ type rawAdapter interface {
 	GetStatus(ch raw.TPCANHandle) raw.TPCANStatus
 	GetErrorText(code raw.TPCANStatus, lang uint16) (string, raw.TPCANStatus)
 	Reset(ch raw.TPCANHandle) raw.TPCANStatus
+
+	// 参数 / 过滤器 API（阶段 5 引入）。
+	SetValue(ch raw.TPCANHandle, p raw.TPCANParameter, buf unsafe.Pointer, n uint32) raw.TPCANStatus
+	GetValue(ch raw.TPCANHandle, p raw.TPCANParameter, buf unsafe.Pointer, n uint32) raw.TPCANStatus
+	FilterMessages(ch raw.TPCANHandle, fromID, toID uint32, mode raw.TPCANMessageType) raw.TPCANStatus
 }
 
 // liveAdapter 是生产实现：薄包装直接调 raw.*。
@@ -61,4 +70,16 @@ func (liveAdapter) GetErrorText(code raw.TPCANStatus, lang uint16) (string, raw.
 
 func (liveAdapter) Reset(ch raw.TPCANHandle) raw.TPCANStatus {
 	return raw.Reset(ch)
+}
+
+func (liveAdapter) SetValue(ch raw.TPCANHandle, p raw.TPCANParameter, buf unsafe.Pointer, n uint32) raw.TPCANStatus {
+	return raw.SetValue(ch, p, buf, n)
+}
+
+func (liveAdapter) GetValue(ch raw.TPCANHandle, p raw.TPCANParameter, buf unsafe.Pointer, n uint32) raw.TPCANStatus {
+	return raw.GetValue(ch, p, buf, n)
+}
+
+func (liveAdapter) FilterMessages(ch raw.TPCANHandle, fromID, toID uint32, mode raw.TPCANMessageType) raw.TPCANStatus {
+	return raw.FilterMessages(ch, fromID, toID, mode)
 }

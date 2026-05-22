@@ -54,12 +54,16 @@ func (b *Bus) readerLoop() {
 // waitForData 根据接收模式等待"有数据"信号。
 //
 // 返回 false 表示要退出（closing 已关闭）。
-// 阶段 4 仅实现 Polling 路径；Event 在阶段 5 接入。
+// Event 模式（Windows）阻塞在 WaitForMultipleObjects；Polling 模式按周期轮询。
 func (b *Bus) waitForData() bool {
 	select {
 	case <-b.closing:
 		return false
 	default:
+	}
+
+	if b.useEvent {
+		return b.waitEventOrAbort()
 	}
 
 	timer := time.NewTimer(b.cfg.pollInterval)

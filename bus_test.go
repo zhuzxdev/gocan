@@ -5,14 +5,17 @@ import (
 	"errors"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/Crush251/pcanbasic_go/raw"
 )
 
 // openTest 是测试专用入口，注入 fake adapter 打开 Classical 通道。
+// 默认强制 ModePolling，避免 ModeAuto 在 Windows 上配合 fake adapter 真启用 Event。
 func openTest(t *testing.T, adapt rawAdapter, opts ...Option) *Bus {
 	t.Helper()
-	bus, err := openWith(adapt, USBBus1, false, "", opts...)
+	allOpts := append([]Option{WithReceiveMode(ModePolling)}, opts...)
+	bus, err := openWith(adapt, USBBus1, false, "", allOpts...)
 	if err != nil {
 		t.Fatalf("openWith: %v", err)
 	}
@@ -22,7 +25,8 @@ func openTest(t *testing.T, adapt rawAdapter, opts ...Option) *Bus {
 // openTestFD 是测试专用入口，注入 fake adapter 打开 FD 通道。
 func openTestFD(t *testing.T, adapt rawAdapter, opts ...Option) *Bus {
 	t.Helper()
-	bus, err := openWith(adapt, USBBus1, true, "f_clock=80000000", opts...)
+	allOpts := append([]Option{WithReceiveMode(ModePolling)}, opts...)
+	bus, err := openWith(adapt, USBBus1, true, "f_clock=80000000", allOpts...)
 	if err != nil {
 		t.Fatalf("openWith FD: %v", err)
 	}
@@ -203,7 +207,7 @@ func TestSendMany_AllOK(t *testing.T) {
 	defer bus.Close()
 
 	frames := []Frame{}
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		fr, _ := NewFrame(uint32(0x100+i), []byte{byte(i)})
 		frames = append(frames, fr)
 	}
@@ -226,7 +230,7 @@ func TestSendMany_PartialFailure(t *testing.T) {
 	defer bus.Close()
 
 	frames := []Frame{}
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		fr, _ := NewFrame(uint32(0x100+i), []byte{byte(i)})
 		frames = append(frames, fr)
 	}
@@ -255,7 +259,7 @@ func TestSendMany_CtxCancel(t *testing.T) {
 	cancel()
 
 	frames := []Frame{}
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		fr, _ := NewFrame(uint32(0x100+i), nil)
 		frames = append(frames, fr)
 	}
@@ -346,7 +350,7 @@ func TestReader_SuppressQRCVEMPTY(t *testing.T) {
 
 func TestReader_DrainsQueue(t *testing.T) {
 	f := newFakeAdapter()
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		f.push(raw.TPCANMsg{ID: uint32(0x100 + i), Len: 1, Data: [8]byte{byte(i)}})
 	}
 	bus := openTest(t, f, WithPollInterval(time.Millisecond))
@@ -532,7 +536,7 @@ func TestReader_PropagatesPCANError(t *testing.T) {
 
 func TestConcurrent_SendReceive(t *testing.T) {
 	f := newFakeAdapter()
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		f.push(raw.TPCANMsg{ID: uint32(i), Len: 1, Data: [8]byte{byte(i)}})
 	}
 	bus := openTest(t, f, WithPollInterval(time.Millisecond))
@@ -540,7 +544,7 @@ func TestConcurrent_SendReceive(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		for i := 0; i < 50; i++ {
+		for i := range 50 {
 			fr, _ := NewFrame(uint32(i), []byte{byte(i)})
 			_ = bus.Send(context.Background(), fr)
 		}
@@ -591,4 +595,111 @@ func (a *errInjectingAdapter) GetStatus(raw.TPCANHandle) raw.TPCANStatus {
 func (a *errInjectingAdapter) GetErrorText(raw.TPCANStatus, uint16) (string, raw.TPCANStatus) {
 	return "fake", raw.PCAN_ERROR_OK
 }
+// ---- 过滤器与 ReceiveMode 相关 ----
+
+func TestSetFilter_Standard_CallsFilterMessages(t *testing.T) {
+	f := newFakeAdapter()
+	bus := openTest(t, f)
+	defer bus.Close()
+	if err := bus.SetFilter(0x100, 0x1FF, FilterStandard); err != nil {
+		t.Fatal(err)
+	}
+	if f.filterCalls != 1 {
+		t.Errorf("filterCalls = %d, want 1", f.filterCalls)
+	}
+	if f.lastFilterFrom != 0x100 || f.lastFilterTo != 0x1FF {
+		t.Errorf("filter range = [0x%X, 0x%X]", f.lastFilterFrom, f.lastFilterTo)
+	}
+	if f.lastFilterMode&raw.PCAN_MESSAGE_EXTENDED != 0 {
+		t.Errorf("Standard 模式不应带 EXTENDED 位, got 0x%X", f.lastFilterMode)
+	}
+}
+
+func TestSetFilter_Extended_PassesExtendedFlag(t *testing.T) {
+	f := newFakeAdapter()
+	bus := openTest(t, f)
+	defer bus.Close()
+	if err := bus.SetFilter(0x10000000, 0x1FFFFFFF, FilterExtended); err != nil {
+		t.Fatal(err)
+	}
+	if f.lastFilterMode&raw.PCAN_MESSAGE_EXTENDED == 0 {
+		t.Errorf("Extended 模式应带 EXTENDED 位, got 0x%X", f.lastFilterMode)
+	}
+}
+
+func TestSetFilter_PCANError(t *testing.T) {
+	f := newFakeAdapter()
+	f.filterReturn = raw.PCAN_ERROR_ILLPARAMVAL
+	bus := openTest(t, f)
+	defer bus.Close()
+	err := bus.SetFilter(0x100, 0x1FF, FilterStandard)
+	if !errors.Is(err, ErrIllParamValue) {
+		t.Errorf("got %v, want ErrIllParamValue", err)
+	}
+}
+
+func TestSetFilter_AfterClose(t *testing.T) {
+	f := newFakeAdapter()
+	bus := openTest(t, f)
+	bus.Close()
+	if err := bus.SetFilter(0, 0, FilterStandard); !errors.Is(err, ErrBusClosed) {
+		t.Errorf("got %v, want ErrBusClosed", err)
+	}
+}
+
+func TestResetFilter_CallsSetValueWithOpen(t *testing.T) {
+	f := newFakeAdapter()
+	bus := openTest(t, f)
+	defer bus.Close()
+	if err := bus.ResetFilter(); err != nil {
+		t.Fatal(err)
+	}
+	if f.setValueCalls != 1 {
+		t.Errorf("setValueCalls = %d, want 1", f.setValueCalls)
+	}
+	if f.lastSetValueParam != raw.PCAN_MESSAGE_FILTER {
+		t.Errorf("setValueParam = 0x%X, want PCAN_MESSAGE_FILTER", f.lastSetValueParam)
+	}
+	if f.lastSetValueU32 != uint32(raw.PCAN_FILTER_OPEN) {
+		t.Errorf("setValueU32 = %d, want PCAN_FILTER_OPEN", f.lastSetValueU32)
+	}
+}
+
+func TestResetFilter_AfterClose(t *testing.T) {
+	f := newFakeAdapter()
+	bus := openTest(t, f)
+	bus.Close()
+	if err := bus.ResetFilter(); !errors.Is(err, ErrBusClosed) {
+		t.Errorf("got %v, want ErrBusClosed", err)
+	}
+}
+
+// ModeAuto 在非 Windows 上应降级到 Polling（useEvent == false 仍能正常收帧）。
+// 在 Windows 上配合 fake adapter（SetValue 成功）会真启用 Event 模式 ——
+// 但 fake 永远不会 SetEvent，所以 reader 会卡住。本测试只验证降级路径，
+// 因此用 ModePolling 强制走轮询；ModeAuto 的降级日志路径由集成场景覆盖。
+func TestOpen_ModePolling_NoEventHandles(t *testing.T) {
+	f := newFakeAdapter()
+	bus, err := openWith(f, USBBus1, false, "", WithReceiveMode(ModePolling))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bus.Close()
+	if bus.useEvent {
+		t.Error("ModePolling 不应启用 Event 模式")
+	}
+	if f.setValueCalls != 0 {
+		t.Errorf("ModePolling 不应调用 SetValue, got %d", f.setValueCalls)
+	}
+}
+
 func (a *errInjectingAdapter) Reset(raw.TPCANHandle) raw.TPCANStatus { return raw.PCAN_ERROR_OK }
+func (a *errInjectingAdapter) SetValue(raw.TPCANHandle, raw.TPCANParameter, unsafe.Pointer, uint32) raw.TPCANStatus {
+	return raw.PCAN_ERROR_OK
+}
+func (a *errInjectingAdapter) GetValue(raw.TPCANHandle, raw.TPCANParameter, unsafe.Pointer, uint32) raw.TPCANStatus {
+	return raw.PCAN_ERROR_OK
+}
+func (a *errInjectingAdapter) FilterMessages(raw.TPCANHandle, uint32, uint32, raw.TPCANMessageType) raw.TPCANStatus {
+	return raw.PCAN_ERROR_OK
+}

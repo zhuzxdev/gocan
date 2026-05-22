@@ -2,6 +2,7 @@ package pcanbasic
 
 import (
 	"sync"
+	"unsafe"
 
 	"github.com/Crush251/pcanbasic_go/raw"
 )
@@ -39,6 +40,18 @@ type fakeAdapter struct {
 	// 收到的最后一帧（便于断言写出内容）。
 	lastWrittenMsg   *raw.TPCANMsg
 	lastWrittenMsgFD *raw.TPCANMsgFD
+
+	// 过滤器 / SetValue / GetValue 调用记录（阶段 5）。
+	filterCalls       int
+	lastFilterFrom    uint32
+	lastFilterTo      uint32
+	lastFilterMode    raw.TPCANMessageType
+	filterReturn      raw.TPCANStatus
+	setValueCalls     int
+	lastSetValueParam raw.TPCANParameter
+	lastSetValueU32   uint32 // 若 n==4，缓存写入值便于断言
+	setValueReturn    raw.TPCANStatus
+	getValueReturn    raw.TPCANStatus
 
 	// 待派发的接收帧（reader 模式下从这里取）。
 	rxQueue   []rxItem
@@ -162,6 +175,33 @@ func (f *fakeAdapter) Reset(ch raw.TPCANHandle) raw.TPCANStatus {
 	defer f.mu.Unlock()
 	f.resetCalls++
 	return f.resetReturn
+}
+
+func (f *fakeAdapter) FilterMessages(ch raw.TPCANHandle, fromID, toID uint32, mode raw.TPCANMessageType) raw.TPCANStatus {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.filterCalls++
+	f.lastFilterFrom = fromID
+	f.lastFilterTo = toID
+	f.lastFilterMode = mode
+	return f.filterReturn
+}
+
+func (f *fakeAdapter) SetValue(ch raw.TPCANHandle, p raw.TPCANParameter, buf unsafe.Pointer, n uint32) raw.TPCANStatus {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setValueCalls++
+	f.lastSetValueParam = p
+	if n == 4 && buf != nil {
+		f.lastSetValueU32 = *(*uint32)(buf)
+	}
+	return f.setValueReturn
+}
+
+func (f *fakeAdapter) GetValue(ch raw.TPCANHandle, p raw.TPCANParameter, buf unsafe.Pointer, n uint32) raw.TPCANStatus {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.getValueReturn
 }
 
 // push 把一帧 Classical 报文塞进接收队列，供 reader 取走。

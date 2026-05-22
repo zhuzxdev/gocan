@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"sync/atomic"
+	"unsafe"
 
 	"github.com/Crush251/pcanbasic_go/raw"
 )
@@ -21,6 +22,12 @@ type Bus struct {
 	rxCh    chan Frame
 	errCh   chan error
 	closing chan struct{}
+
+	// Event 模式相关（Windows 真实生效；其他平台为 0）。
+	// 用 uintptr 而不是 windows.Handle，以保持类型跨平台一致。
+	eventHandle uintptr // PCAN 接收事件
+	abortHandle uintptr // Close 时唤醒 reader 用的 abort 事件
+	useEvent    bool    // 实际启用了 Event 模式（非 ModeEvent 显式 + 也包含 Auto 升级）
 
 	// 关闭管理。
 	closeOnce sync.Once
@@ -73,6 +80,25 @@ func openWith(adapt rawAdapter, ch Channel, fd bool, fdBitrate string, opts ...O
 		errCh:   make(chan error, cfg.errBufferSize),
 		closing: make(chan struct{}),
 	}
+
+	// 根据 ReceiveMode 决定接收路径。
+	// ModePolling：直接 Polling。
+	// ModeEvent：必须成功；失败则 Uninitialize 后返回错误。
+	// ModeAuto：先尝试 Event，失败则降级到 Polling 并打日志。
+	switch cfg.receiveMode {
+	case ModePolling:
+		// 不调用 setupEventMode，useEvent 保持 false。
+	case ModeEvent:
+		if err := b.setupEventMode(); err != nil {
+			_ = adapt.Uninitialize(ch)
+			return nil, err
+		}
+	case ModeAuto:
+		if err := b.setupEventMode(); err != nil {
+			cfg.logger.Infof("event mode unavailable, falling back to polling: %v", err)
+		}
+	}
+
 	b.startReader()
 	return b, nil
 }
@@ -173,19 +199,56 @@ func (b *Bus) Reset() error {
 	return nil
 }
 
+// SetFilter 设置消息过滤范围（PCAN 默认是开放的，本方法用于收窄）。
+//
+// idMin/idMax 是要接受的 ID 闭区间；mode 区分 11 位 / 29 位 ID。
+// 多次调用会累加：要恢复"接收全部"应调用 ResetFilter。
+func (b *Bus) SetFilter(idMin, idMax uint32, mode FilterMode) error {
+	if b.closed.Load() {
+		return ErrBusClosed
+	}
+	var mt raw.TPCANMessageType
+	if mode == FilterExtended {
+		mt = raw.PCAN_MESSAGE_EXTENDED
+	}
+	if s := b.adapt.FilterMessages(b.ch, idMin, idMax, mt); s != raw.PCAN_ERROR_OK {
+		return wrapStatus(b.adapt, "CAN_FilterMessages", s)
+	}
+	return nil
+}
+
+// ResetFilter 恢复"接收全部"。
+// 实现方式：通过 SetValue(PCAN_MESSAGE_FILTER, PCAN_FILTER_OPEN) 打开滤波器。
+func (b *Bus) ResetFilter() error {
+	if b.closed.Load() {
+		return ErrBusClosed
+	}
+	v := uint32(raw.PCAN_FILTER_OPEN)
+	s := b.adapt.SetValue(b.ch, raw.PCAN_MESSAGE_FILTER,
+		unsafe.Pointer(&v), uint32(unsafe.Sizeof(v)))
+	if s != raw.PCAN_ERROR_OK {
+		return wrapStatus(b.adapt, "CAN_SetValue(MESSAGE_FILTER=OPEN)", s)
+	}
+	return nil
+}
+
 // Close 释放底层通道。幂等：多次调用安全。
 //
-// 流程：标记 closed → 关闭 closing channel 通知 reader → 等 reader 退出
-// （表现为 rxCh 被 reader 关闭）→ Uninitialize 释放底层资源 → 关闭 errCh。
+// 流程：标记 closed → 关闭 closing → 触发 abort event 唤醒 reader →
+// 等 reader 关闭 rxCh → 释放 event 句柄 → Uninitialize → 关闭 errCh。
 func (b *Bus) Close() error {
 	var err error
 	b.closeOnce.Do(func() {
 		b.closed.Store(true)
 		close(b.closing)
+		// Event 模式下需要 SetEvent 唤醒阻塞在 WaitForMultipleObjects 的 reader。
+		b.closeEventMode()
 		// 等 reader goroutine 退出 —— 它在退出时关闭 rxCh。
 		for range b.rxCh {
 			// 丢弃剩余帧，避免 reader 阻塞在 rxCh 发送。
 		}
+		// reader 已退出，可以安全 CloseHandle。
+		b.finalizeEventMode()
 		if s := b.adapt.Uninitialize(b.ch); s != raw.PCAN_ERROR_OK {
 			err = wrapStatus(b.adapt, "CAN_Uninitialize", s)
 		}
