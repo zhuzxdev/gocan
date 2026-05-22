@@ -1,0 +1,44 @@
+# Go 编译产物
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.prof
+coverage.txt
+coverage.html
+
+# Go workspace
+go.work
+go.work.sum
+
+# 依赖目录（Go modules 模式不需要 vendor）
+vendor/
+
+# IDE / 编辑器
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 本地测试产物
+/bin/
+/dist/
+/build/
+
+# 私密 / 本地配置
+.env
+.env.local
+*.local.yml
+*.local.yaml
+
+# 真机测试可能产生的日志
+*.log
+testdata/runtime/
+
+# 注意：PCANBasic.dll 不应进仓库，由用户自行从官方包获取
+PCANBasic.dll
