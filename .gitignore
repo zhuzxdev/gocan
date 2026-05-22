@@ -16,6 +16,8 @@ go.work.sum
 
 # 依赖目录（Go modules 模式不需要 vendor）
 vendor/
+# 文档目录
+docx/
 
 # IDE / 编辑器
 .idea/
