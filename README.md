@@ -88,9 +88,8 @@ func main() {
 
 | 版本 | 主要内容 |
 |---|---|
-| v0.1.0 | Classical + FD 收发、Bus 完整高层、raw 子包基础 API、文档与示例 |
-| v0.2.0 | LookUpChannel、设备信息查询、Trace；Linux `libpcanbasic.so` 适配 |
-| v0.3.0 | CAN XL（视需求） |
+| v0.1.0 | Classical + FD 收发、Bus 完整高层、raw 子包基础 API、文档与示例（Windows 后端） |
+| v0.2.0 | LookUpChannel、设备信息查询、Trace；**Linux 后端走 socketcan**（参考 [python-can](https://python-can.readthedocs.io/) 的多后端抽象），同一套 `Bus` API、按平台编译期切换后端 |
 | v1.0.0 | API 冻结，进入严格兼容承诺 |
 
 ---

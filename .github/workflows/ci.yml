@@ -4,7 +4,8 @@
 # - 主目标平台是 Windows（PCANBasic.dll 是 Windows 二进制）
 # - 非 Windows 平台只编译/单测，不能跑真实硬件
 # - 通过 build tag 区分 windows/非 windows 实现
-# - 因此 CI 需要在两个 OS 上独立验证编译与单测
+# - 因此 CI 在 Linux/Windows/macOS 上独立验证编译与单测
+# - 覆盖率只在 Linux 上算（避免 windows pwsh 对 -coverprofile=... 的解析坑）
 name: CI
 
 on:
@@ -63,7 +64,7 @@ jobs:
           GOOS: windows
         run: go vet ./...
 
-  # 第二步：多 Go 版本 × 多 OS 测试矩阵
+  # 第二步：多 Go 版本 × 多 OS 测试矩阵（不算覆盖率，避免 pwsh 解析坑）
   test:
     name: Test (${{ matrix.os }} / go ${{ matrix.go }})
     needs: lint
@@ -73,6 +74,10 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         go: ['1.22', '1.23']
     runs-on: ${{ matrix.os }}
+    # 用 bash（windows 上是 git bash），避免 pwsh 对 native 命令的参数解析差异
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -80,12 +85,25 @@ jobs:
           go-version: ${{ matrix.go }}
           cache: true
 
-      - name: go test
-        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+      - name: go test (race)
+        run: go test -race ./...
+
+  # 第三步：单独的覆盖率 job（仅 Linux + 最新 Go，上传到 Codecov）
+  coverage:
+    name: Coverage
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: go test (coverage)
+        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
 
       - name: Upload coverage to Codecov
-        # 只在 Linux + 最新 Go 版本上传，避免重复
-        if: matrix.os == 'ubuntu-latest' && matrix.go == '1.23'
         uses: codecov/codecov-action@v4
         with:
           files: coverage.out
@@ -94,7 +112,7 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
-  # 第三步：跨平台编译矩阵（Windows 是真实目标）
+  # 第四步：跨平台编译矩阵（Windows 是真实目标）
   build:
     name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
     needs: lint
@@ -134,7 +152,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: go build ./examples/...
 
-  # 第四步：示例代码独立 vet（即使示例不进 lint，也保证可编译）
+  # 第五步：示例代码独立 vet（即使示例不进 lint，也保证可编译）
   examples:
     name: Examples sanity check
     needs: lint
