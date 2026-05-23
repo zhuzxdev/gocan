@@ -146,10 +146,3 @@ func (e *SendManyError) Error() string {
 
 // Unwrap 让 errors.Is/errors.As 可以穿透到内部错误。
 func (e *SendManyError) Unwrap() error { return e.Err }
-
-// newError 是给内部代码构造 *Error 的快捷工厂。
-// 调用方负责传 op；msg 通过 raw.GetErrorText 自动填充。
-func newError(op string, code raw.TPCANStatus) *Error {
-	msg, _ := raw.GetErrorText(code, raw.LanguageEnglish)
-	return &Error{Code: code, Op: op, Msg: msg}
-}

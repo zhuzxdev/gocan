@@ -25,8 +25,10 @@ type Bus struct {
 
 	// Event 模式相关（Windows 真实生效；其他平台为 0）。
 	// 用 uintptr 而不是 windows.Handle，以保持类型跨平台一致。
-	eventHandle uintptr // PCAN 接收事件
-	abortHandle uintptr // Close 时唤醒 reader 用的 abort 事件
+	// nolint 提示：这两个字段仅在 event_windows.go 里被读写，
+	// Linux 构建看不到那些引用——这是构建标签的正常代价，不是死代码。
+	eventHandle uintptr //nolint:unused // 仅 windows 构建使用
+	abortHandle uintptr //nolint:unused // 仅 windows 构建使用
 	useEvent    bool    // 实际启用了 Event 模式（非 ModeEvent 显式 + 也包含 Auto 升级）
 
 	// 关闭管理。

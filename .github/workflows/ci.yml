@@ -1,43 +1,149 @@
+# CI: 静态检查 + 跨平台测试 + 编译矩阵 + 覆盖率
+#
+# 项目特性：
+# - 主目标平台是 Windows（PCANBasic.dll 是 Windows 二进制）
+# - 非 Windows 平台只编译/单测，不能跑真实硬件
+# - 通过 build tag 区分 windows/非 windows 实现
+# - 因此 CI 需要在两个 OS 上独立验证编译与单测
 name: CI
 
 on:
   push:
     branches: [main]
+    tags-ignore: ['v*']  # tag 由 release.yml 处理
   pull_request:
+    branches: [main]
+
+# 同一 PR 的新 push 会取消正在跑的 CI，节省 minute
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  test-linux:
+  # 第一步：静态检查（gofmt / go vet / golangci-lint / go mod tidy）
+  # 失败立刻终止后续 job，避免浪费资源
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.23'
+          cache: true
+
+      - name: Verify go mod tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "::error::gofmt issues:"
+            echo "$out"
+            exit 1
+          fi
+
       - name: go vet
         run: go vet ./...
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
-      - name: tests (race)
-        run: go test -race ./...
-      - name: build examples
-        run: go build ./examples/...
-      - name: cross-compile windows/amd64
-        run: GOOS=windows GOARCH=amd64 go build ./...
-      - name: cross-compile windows/386
-        run: GOOS=windows GOARCH=386 go build ./...
+          version: v1.62.0
 
-  test-windows:
-    runs-on: windows-latest
+      # 单独再 vet 一遍 windows 视角的源码，捕捉 build-tag 文件里的问题
+      - name: go vet (GOOS=windows)
+        env:
+          GOOS: windows
+        run: go vet ./...
+
+  # 第二步：多 Go 版本 × 多 OS 测试矩阵
+  test:
+    name: Test (${{ matrix.os }} / go ${{ matrix.go }})
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        go: ['1.22', '1.23']
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
-      - name: go vet
-        run: go vet ./...
-      - name: tests
-        run: go test ./...
-      - name: build examples
+          go-version: ${{ matrix.go }}
+          cache: true
+
+      - name: go test
+        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Upload coverage to Codecov
+        # 只在 Linux + 最新 Go 版本上传，避免重复
+        if: matrix.os == 'ubuntu-latest' && matrix.go == '1.23'
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.out
+          flags: unittests
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  # 第三步：跨平台编译矩阵（Windows 是真实目标）
+  build:
+    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+    needs: lint
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: '386'
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: go build (library)
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build ./...
+
+      - name: go build (examples)
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
         run: go build ./examples/...
+
+  # 第四步：示例代码独立 vet（即使示例不进 lint，也保证可编译）
+  examples:
+    name: Examples sanity check
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+      - name: vet examples
+        run: go vet ./examples/...

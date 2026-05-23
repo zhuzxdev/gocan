@@ -595,6 +595,7 @@ func (a *errInjectingAdapter) GetStatus(raw.TPCANHandle) raw.TPCANStatus {
 func (a *errInjectingAdapter) GetErrorText(raw.TPCANStatus, uint16) (string, raw.TPCANStatus) {
 	return "fake", raw.PCAN_ERROR_OK
 }
+
 // ---- 过滤器与 ReceiveMode 相关 ----
 
 func TestSetFilter_Standard_CallsFilterMessages(t *testing.T) {

@@ -3,6 +3,10 @@
 > PEAK-System **PCANBasic.dll** 的 Go 语言封装库（Windows 专用）。
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/Crush251/pcanbasic_go.svg)](https://pkg.go.dev/github.com/Crush251/pcanbasic_go)
+[![CI](https://github.com/Crush251/pcanbasic_go/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Crush251/pcanbasic_go/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/Crush251/pcanbasic_go/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/Crush251/pcanbasic_go/actions/workflows/codeql.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/Crush251/pcanbasic_go)](https://goreportcard.com/report/github.com/Crush251/pcanbasic_go)
+[![codecov](https://codecov.io/gh/Crush251/pcanbasic_go/branch/main/graph/badge.svg)](https://codecov.io/gh/Crush251/pcanbasic_go)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 `pcanbasic_go` 在 Windows 平台用纯 Go（`syscall` 调用，无 CGO）封装 PEAK-System 的

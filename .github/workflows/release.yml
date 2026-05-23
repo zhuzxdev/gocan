@@ -1,0 +1,82 @@
+# Release: 当推送 vX.Y.Z 形式的 tag 时，自动生成 GitHub Release。
+#
+# 流程：
+#   1. 复用 CI 的检查（确保 tag 对应的 commit 是绿的）
+#   2. 从 CHANGELOG.md 提取本 tag 对应的小节作为 release notes
+#   3. 创建 GitHub Release（草稿可选）
+#
+# 不构建/上传二进制 —— 这是一个库，不是 CLI 工具，用户通过 `go get` 拉取。
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write  # 创建 release 需要写 contents
+
+jobs:
+  verify:
+    name: Verify before release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test -race ./...
+      - name: cross-compile windows/amd64
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: go build ./...
+      - name: cross-compile windows/386
+        env:
+          GOOS: windows
+          GOARCH: '386'
+        run: go build ./...
+
+  release:
+    name: Create GitHub Release
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 需要完整历史以便提取 changelog
+
+      - name: Extract release notes from CHANGELOG.md
+        id: changelog
+        run: |
+          tag="${GITHUB_REF##*/}"          # e.g. v0.1.0
+          version="${tag#v}"               # e.g. 0.1.0
+          echo "Extracting notes for [$version]"
+
+          # 提取 "## [version]" 这一节，直到下一个 "## [" 或文件末尾
+          awk -v ver="$version" '
+            $0 ~ "^## \\[" ver "\\]" { capture=1; next }
+            capture && /^## \[/        { exit }
+            capture                    { print }
+          ' CHANGELOG.md > release_notes.md
+
+          if [ ! -s release_notes.md ]; then
+            echo "::warning::No CHANGELOG entry found for $version, using default notes"
+            echo "Release $tag" > release_notes.md
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.changelog.outputs.tag }}
+          name: ${{ steps.changelog.outputs.tag }}
+          body_path: release_notes.md
+          draft: false
+          prerelease: ${{ contains(steps.changelog.outputs.tag, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
