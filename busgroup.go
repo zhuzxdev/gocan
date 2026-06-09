@@ -56,6 +56,11 @@ func (g *BusGroup) Add(name string, ch Channel, opts ...Option) (*Bus, error) {
 	return g.add(name, false, "", ch, opts...)
 }
 
+// AddFD 等价于 Add，但调底层 OpenFD。
+func (g *BusGroup) AddFD(name string, ch Channel, fdBitrate string, opts ...Option) (*Bus, error) {
+	return g.add(name, true, fdBitrate, ch, opts...)
+}
+
 func (g *BusGroup) add(name string, fd bool, fdBitrate string, ch Channel, opts ...Option) (*Bus, error) {
 	if name == "" {
 		return nil, ErrInvalidName

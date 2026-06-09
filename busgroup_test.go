@@ -80,3 +80,16 @@ func TestBusGroup_AddRejectsDuplicate(t *testing.T) {
 		t.Errorf("duplicate Add err = %v, want ErrDuplicateName", err)
 	}
 }
+
+func TestBusGroup_AddFD(t *testing.T) {
+	withFakeOpener(t)
+	g := NewBusGroup(0)
+	bus, err := g.AddFD("fd", raw.PCAN_USBBUS1, "f_clock=80000000,nom_brp=10,nom_tseg1=12,nom_tseg2=3,nom_sjw=1")
+	if err != nil {
+		t.Fatalf("AddFD: %v", err)
+	}
+	defer bus.Close()
+	if got, _ := g.Get("fd"); got != bus {
+		t.Errorf("Get(fd) mismatch")
+	}
+}
