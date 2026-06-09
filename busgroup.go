@@ -123,3 +123,18 @@ func (g *BusGroup) Names() []string {
 	sort.Strings(names)
 	return names
 }
+
+// Each 在持有读锁下按 Names 顺序遍历每个 Bus。
+// fn 内禁止调 Add/AddFD/Close —— 会死锁，race 模式下会被检测出来。
+func (g *BusGroup) Each(fn func(name string, bus *Bus)) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	names := make([]string, 0, len(g.buses))
+	for n := range g.buses {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		fn(n, g.buses[n])
+	}
+}

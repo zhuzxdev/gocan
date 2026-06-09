@@ -93,3 +93,23 @@ func TestBusGroup_AddFD(t *testing.T) {
 		t.Errorf("Get(fd) mismatch")
 	}
 }
+
+func TestBusGroup_EachOrder(t *testing.T) {
+	withFakeOpener(t)
+	g := NewBusGroup(0)
+	channels := map[string]Channel{
+		"c": raw.PCAN_USBBUS1,
+		"a": raw.PCAN_USBBUS2,
+		"b": raw.PCAN_USBBUS3,
+	}
+	for _, n := range []string{"c", "a", "b"} {
+		if _, err := g.Add(n, channels[n]); err != nil {
+			t.Fatalf("Add %s: %v", n, err)
+		}
+	}
+	var seen []string
+	g.Each(func(name string, _ *Bus) { seen = append(seen, name) })
+	if len(seen) != 3 || seen[0] != "a" || seen[1] != "b" || seen[2] != "c" {
+		t.Errorf("Each order = %v, want [a b c]", seen)
+	}
+}
