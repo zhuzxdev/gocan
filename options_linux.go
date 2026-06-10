@@ -2,7 +2,11 @@
 
 package gocan
 
-import "github.com/Crush251/gocan/raw"
+import (
+	"time"
+
+	"github.com/Crush251/gocan/raw"
+)
 
 // CAN 错误帧位掩码（与 raw 包对应常量等价）。
 const (
@@ -72,5 +76,32 @@ const (
 func WithRecvTimestamp(mode RxTimestamp) Option {
 	return func(c *config) {
 		c.linux.rxTimestamp = mode
+	}
+}
+
+// WithSocketBuffers 设置 SO_RCVBUF / SO_SNDBUF。任一非正值则跳过对应方向。
+// 实际生效值受内核 net.core.rmem_max / wmem_max 上限限制。
+func WithSocketBuffers(rcvBytes, sndBytes int) Option {
+	return func(c *config) {
+		if rcvBytes > 0 {
+			c.linux.soRcvBuf = rcvBytes
+		}
+		if sndBytes > 0 {
+			c.linux.soSndBuf = sndBytes
+		}
+	}
+}
+
+// WithRWTimeout 设置 SO_RCVTIMEO / SO_SNDTIMEO。零值表示该方向不设超时。
+// 注意：当前 reader goroutine 用 polling 循环 + 短读，超时通常无显著影响；
+// 主要用于 SocketCAN 在某些场景下避免 read() 永远阻塞。
+func WithRWTimeout(read, write time.Duration) Option {
+	return func(c *config) {
+		if read > 0 {
+			c.linux.readTimeout = read
+		}
+		if write > 0 {
+			c.linux.writeTimeout = write
+		}
 	}
 }

@@ -2,7 +2,10 @@
 
 package gocan
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestWithLoopback_SetsField(t *testing.T) {
 	cfg := newDefaultConfig()
@@ -45,5 +48,27 @@ func TestWithRecvTimestamp_SetsField(t *testing.T) {
 	WithRecvTimestamp(RxTimestampNano)(cfg)
 	if cfg.linux.rxTimestamp != RxTimestampNano {
 		t.Errorf("rxTimestamp = %v, want %v", cfg.linux.rxTimestamp, RxTimestampNano)
+	}
+}
+
+func TestWithSocketBuffers_SetsFields(t *testing.T) {
+	cfg := newDefaultConfig()
+	WithSocketBuffers(64*1024, 32*1024)(cfg)
+	if cfg.linux.soRcvBuf != 64*1024 {
+		t.Errorf("soRcvBuf = %d, want %d", cfg.linux.soRcvBuf, 64*1024)
+	}
+	if cfg.linux.soSndBuf != 32*1024 {
+		t.Errorf("soSndBuf = %d, want %d", cfg.linux.soSndBuf, 32*1024)
+	}
+}
+
+func TestWithRWTimeout_SetsFields(t *testing.T) {
+	cfg := newDefaultConfig()
+	WithRWTimeout(500*time.Millisecond, 250*time.Millisecond)(cfg)
+	if cfg.linux.readTimeout != 500*time.Millisecond {
+		t.Errorf("readTimeout = %v", cfg.linux.readTimeout)
+	}
+	if cfg.linux.writeTimeout != 250*time.Millisecond {
+		t.Errorf("writeTimeout = %v", cfg.linux.writeTimeout)
 	}
 }
