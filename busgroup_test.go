@@ -201,3 +201,16 @@ func TestBusGroup_ReceiveClosesAfterClose(t *testing.T) {
 	for range g.Receive() {
 	}
 }
+
+func TestBusSetErrFilter_OnClosedBus(t *testing.T) {
+	withFakeOpener(t)
+	g := NewBusGroup(0)
+	bus, err := g.Add("a", raw.PCAN_USBBUS1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = g.Close()
+	if err := bus.SetErrFilter(0); err == nil {
+		t.Error("expected non-nil error after Close")
+	}
+}
