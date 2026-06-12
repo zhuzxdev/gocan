@@ -3,6 +3,8 @@ package gocan
 import (
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/Crush251/gocan/raw"
 )
@@ -146,3 +148,46 @@ func (e *SendManyError) Error() string {
 
 // Unwrap 让 errors.Is/errors.As 可以穿透到内部错误。
 func (e *SendManyError) Unwrap() error { return e.Err }
+
+// 多 Bus 群组错误。
+var (
+	// ErrInvalidName 表示 BusGroup.Add 收到的 name 为空字符串。
+	ErrInvalidName = errors.New("gocan: invalid bus name")
+	// ErrDuplicateName 表示 BusGroup 中已存在同名 Bus。
+	ErrDuplicateName = errors.New("gocan: duplicate bus name in group")
+)
+
+// GroupCloseError 聚合 BusGroup.Close 时多个 Bus 的失败。
+//
+// Causes 按名字索引每个失败 Bus 的错误；成功关闭的 Bus 不出现在 map 中。
+// errors.Is 会按 Causes 逐个尝试匹配，因此可以 errors.Is(err, ErrBusClosed) 等。
+type GroupCloseError struct {
+	Causes map[string]error
+}
+
+// Error 实现 error。
+func (e *GroupCloseError) Error() string {
+	names := make([]string, 0, len(e.Causes))
+	for n := range e.Causes {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	b.WriteString("gocan: BusGroup.Close failed for ")
+	for i, n := range names {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "%s: %v", n, e.Causes[n])
+	}
+	return b.String()
+}
+
+// Unwrap 返回所有底层错误，便于 errors.Is/errors.As 穿透。
+func (e *GroupCloseError) Unwrap() []error {
+	out := make([]error, 0, len(e.Causes))
+	for _, err := range e.Causes {
+		out = append(out, err)
+	}
+	return out
+}

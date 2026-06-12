@@ -2,6 +2,7 @@ package gocan
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Crush251/gocan/raw"
@@ -91,5 +92,32 @@ func TestSendManyError_IsThroughUnwrap(t *testing.T) {
 	e := &SendManyError{Index: 1, Err: pcanErr}
 	if !errors.Is(e, ErrQueueXmtFull) {
 		t.Error("errors.Is should reach through SendManyError to *Error.Is")
+	}
+}
+
+func TestGroupCloseError_ErrorAndUnwrap(t *testing.T) {
+	a := errors.New("a fail")
+	b := ErrBusClosed
+	gce := &GroupCloseError{Causes: map[string]error{"front": a, "rear": b}}
+
+	msg := gce.Error()
+	if !strings.Contains(msg, "front") || !strings.Contains(msg, "rear") {
+		t.Errorf("Error() = %q, want both bus names", msg)
+	}
+	if !errors.Is(gce, ErrBusClosed) {
+		t.Errorf("errors.Is(gce, ErrBusClosed) = false, want true")
+	}
+	unwrapped := gce.Unwrap()
+	if len(unwrapped) != 2 {
+		t.Errorf("Unwrap returned %d errors, want 2", len(unwrapped))
+	}
+}
+
+func TestSentinelGroupErrors(t *testing.T) {
+	if ErrInvalidName == nil || ErrDuplicateName == nil {
+		t.Fatal("sentinel errors must be non-nil")
+	}
+	if ErrInvalidName.Error() == ErrDuplicateName.Error() {
+		t.Error("ErrInvalidName and ErrDuplicateName must have distinct messages")
 	}
 }

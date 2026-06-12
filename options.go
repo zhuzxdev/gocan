@@ -84,6 +84,7 @@ type config struct {
 	rxBufferSize  int
 	errBufferSize int
 	logger        Logger
+	linux         linuxConfig // 仅 Linux 构建有真实字段；其他平台为空 struct
 }
 
 // newDefaultConfig 返回填充了默认值的 config。

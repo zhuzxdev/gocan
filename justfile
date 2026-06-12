@@ -105,3 +105,11 @@ status:
     @git status --short
     @echo "==> 最近 5 个 commit"
     @git log --oneline -5
+
+# 创建本地开发 / 集成测试用的虚拟 CAN 接口
+vcan-up:
+    sudo scripts/setup-vcan.sh up vcan0 vcan1
+
+# 删除虚拟 CAN 接口
+vcan-down:
+    sudo scripts/setup-vcan.sh down vcan0 vcan1

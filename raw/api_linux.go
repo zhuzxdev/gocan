@@ -26,9 +26,14 @@ var linuxChannels = struct {
 }{m: make(map[TPCANHandle]*linuxChannel)}
 
 type linuxChannel struct {
-	fd      int
-	isFD    bool
-	filters []unix.CanFilter
+	fd              int
+	isFD            bool
+	filters         []unix.CanFilter
+	errFilter       uint32
+	errFilterSet    bool
+	joinFilters     bool
+	joinFiltersSet  bool
+	rxTimestampMode uint8 // 0=off, 1=SO_TIMESTAMP, 2=SO_TIMESTAMPNS, 3=SO_TIMESTAMPING
 }
 
 // EnsureLoaded 在 Linux SocketCAN 后端无需加载动态库。
@@ -125,6 +130,16 @@ func getLinuxChannel(ch TPCANHandle) (*linuxChannel, TPCANStatus) {
 	return c, PCAN_ERROR_OK
 }
 
+// updateLinuxChannel 在 setsockopt 成功后安全地把状态写回 linuxChannel。
+// 若期间通道被 Uninitialize/Initialize 替换，写入会被跳过（current != c）。
+func updateLinuxChannel(ch TPCANHandle, c *linuxChannel, mut func(*linuxChannel)) {
+	linuxChannels.mu.Lock()
+	if current, ok := linuxChannels.m[ch]; ok && current == c {
+		mut(current)
+	}
+	linuxChannels.mu.Unlock()
+}
+
 // Reset 在 SocketCAN 后端无内部队列可重置，保留为成功的空操作。
 func Reset(ch TPCANHandle) TPCANStatus {
 	_, status := getLinuxChannel(ch)
@@ -141,10 +156,17 @@ func GetStatus(ch TPCANHandle) TPCANStatus {
 }
 
 // Read 读取一帧 Classical CAN 报文。
+// 当 c.rxTimestampMode != 0 时切换到 recvmsg 路径，从 SCM 控制消息提取内核时间戳；
+// 否则保持 unix.Read + fillTimestamp 行为。注意：rxTimestampMode 仅在 Open 阶段
+// （applyPlatformOptions → EnableRxTimestamp）写入一次，之后由 reader goroutine
+// 只读访问，无并发写入风险。
 func Read(ch TPCANHandle, m *TPCANMsg, t *TPCANTimestamp) TPCANStatus {
 	c, status := getLinuxChannel(ch)
 	if status != PCAN_ERROR_OK {
 		return status
+	}
+	if c.rxTimestampMode != 0 {
+		return readClassicalWithTimestamp(c, m, t)
 	}
 	var buf [linuxCANFDFrameSize]byte
 	n, err := unix.Read(c.fd, buf[:])
@@ -164,10 +186,14 @@ func Read(ch TPCANHandle, m *TPCANMsg, t *TPCANTimestamp) TPCANStatus {
 }
 
 // ReadFD 读取一帧 CAN FD 报文。
+// 与 Read 类似，c.rxTimestampMode != 0 时走 recvmsg 路径。
 func ReadFD(ch TPCANHandle, m *TPCANMsgFD, t *TPCANTimestampFD) TPCANStatus {
 	c, status := getLinuxChannel(ch)
 	if status != PCAN_ERROR_OK {
 		return status
+	}
+	if c.rxTimestampMode != 0 {
+		return readFDWithTimestamp(c, m, t)
 	}
 	var buf [linuxCANFDFrameSize]byte
 	n, err := unix.Read(c.fd, buf[:])
@@ -620,4 +646,112 @@ func (bigEndian) PutUint32(b []byte, v uint32) {
 	b[1] = byte(v >> 16)
 	b[2] = byte(v >> 8)
 	b[3] = byte(v)
+}
+
+// readClassicalWithTimestamp 用 recvmsg 取一帧 Classical CAN 报文 + 内核时间戳。
+func readClassicalWithTimestamp(c *linuxChannel, m *TPCANMsg, t *TPCANTimestamp) TPCANStatus {
+	var buf [linuxCANFrameSize]byte
+	var oob [128]byte
+	n, oobn, _, _, err := unix.Recvmsg(c.fd, buf[:], oob[:], 0)
+	if err != nil {
+		return errnoToReadStatus(err)
+	}
+	if n != linuxCANFrameSize {
+		return PCAN_ERROR_ILLDATA
+	}
+	if status := decodeLinuxCANFrame(buf[:linuxCANFrameSize], m); status != PCAN_ERROR_OK {
+		return status
+	}
+	if t != nil {
+		writeKernelTimestamp(oob[:oobn], t)
+	}
+	return PCAN_ERROR_OK
+}
+
+// readFDWithTimestamp 同上，FD 帧。Linux 既可能给我们 16-byte Classical 也可能 72-byte FD。
+func readFDWithTimestamp(c *linuxChannel, m *TPCANMsgFD, t *TPCANTimestampFD) TPCANStatus {
+	var buf [linuxCANFDFrameSize]byte
+	var oob [128]byte
+	n, oobn, _, _, err := unix.Recvmsg(c.fd, buf[:], oob[:], 0)
+	if err != nil {
+		return errnoToReadStatus(err)
+	}
+	switch n {
+	case linuxCANFrameSize:
+		var cm TPCANMsg
+		if status := decodeLinuxCANFrame(buf[:linuxCANFrameSize], &cm); status != PCAN_ERROR_OK {
+			return status
+		}
+		m.ID = cm.ID
+		m.MsgType = cm.MsgType
+		m.DLC = cm.Len
+		copy(m.Data[:], cm.Data[:])
+	case linuxCANFDFrameSize:
+		if status := decodeLinuxCANFDFrame(buf[:], m); status != PCAN_ERROR_OK {
+			return status
+		}
+	default:
+		return PCAN_ERROR_ILLDATA
+	}
+	if t != nil {
+		var ts TPCANTimestamp
+		writeKernelTimestamp(oob[:oobn], &ts)
+		// FD timestamp 直接是 μs 总数
+		*t = uint64(ts.MillisOverflow)*1000*(1<<32) + uint64(ts.Millis)*1000 + uint64(ts.Micros)
+	}
+	return PCAN_ERROR_OK
+}
+
+// writeKernelTimestamp 把控制消息里的 timeval/timespec 解析成微秒，写入 TPCANTimestamp。
+// 不识别的 cmsg 退回到 fillTimestamp。
+func writeKernelTimestamp(oob []byte, t *TPCANTimestamp) {
+	cmsgs, err := unix.ParseSocketControlMessage(oob)
+	if err != nil {
+		fillTimestamp(t)
+		return
+	}
+	for _, cm := range cmsgs {
+		if cm.Header.Level != unix.SOL_SOCKET {
+			continue
+		}
+		switch cm.Header.Type {
+		case unix.SO_TIMESTAMP:
+			if len(cm.Data) >= int(unsafe.Sizeof(unix.Timeval{})) {
+				tv := *(*unix.Timeval)(unsafe.Pointer(&cm.Data[0]))
+				totalUs := uint64(tv.Sec)*1_000_000 + uint64(tv.Usec)
+				timestampFromMicros(totalUs, t)
+				return
+			}
+		case unix.SO_TIMESTAMPNS:
+			if len(cm.Data) >= int(unsafe.Sizeof(unix.Timespec{})) {
+				ts := *(*unix.Timespec)(unsafe.Pointer(&cm.Data[0]))
+				totalUs := uint64(ts.Sec)*1_000_000 + uint64(ts.Nsec)/1000
+				timestampFromMicros(totalUs, t)
+				return
+			}
+		case unix.SO_TIMESTAMPING:
+			// 三段 timespec：software / hw_software_legacy / hw
+			if len(cm.Data) >= 3*int(unsafe.Sizeof(unix.Timespec{})) {
+				p := unsafe.Pointer(&cm.Data[0])
+				sw := *(*unix.Timespec)(p)
+				hw := *(*unix.Timespec)(unsafe.Add(p, 2*int(unsafe.Sizeof(unix.Timespec{}))))
+				chosen := hw
+				if hw.Sec == 0 && hw.Nsec == 0 {
+					chosen = sw
+				}
+				totalUs := uint64(chosen.Sec)*1_000_000 + uint64(chosen.Nsec)/1000
+				timestampFromMicros(totalUs, t)
+				return
+			}
+		}
+	}
+	fillTimestamp(t)
+}
+
+// timestampFromMicros 拆 μs 总数到 TPCANTimestamp 的 Millis/Overflow/Micros 三字段。
+func timestampFromMicros(totalUs uint64, t *TPCANTimestamp) {
+	totalMillis := totalUs / 1000
+	t.Millis = uint32(totalMillis)
+	t.MillisOverflow = uint16(totalMillis >> 32)
+	t.Micros = uint16(totalUs % 1000)
 }

@@ -83,6 +83,11 @@ func openWith(adapt rawAdapter, ch Channel, fd bool, fdBitrate string, opts ...O
 		closing: make(chan struct{}),
 	}
 
+	if err := applyPlatformOptions(b, cfg); err != nil {
+		_ = adapt.Uninitialize(ch)
+		return nil, err
+	}
+
 	// 根据 ReceiveMode 决定接收路径。
 	// ModePolling：直接 Polling。
 	// ModeEvent：必须成功；失败则 Uninitialize 后返回错误。
